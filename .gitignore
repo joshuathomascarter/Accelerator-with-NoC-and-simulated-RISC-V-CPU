@@ -1,0 +1,45 @@
+# Personal planning and local notes
+misc/
+accelerator/docs/PYNQ_MNIST_BRINGUP_PLAN.md
+accelerator/docs/MNIST_TILING_STRATEGY.md
+
+# Generated simulation and synthesis output
+obj_dir/
+Sim/build/
+Sim/xsim/
+build/
+*.vvp
+*.vcd
+*.fst
+*.wdb
+*.jou
+*.log
+*.str
+*.pb
+*.out
+simv*
+
+# Vivado generated projects and overlay products
+*.cache/
+*.gen/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+overlays/mini_accel/*.bit
+overlays/mini_accel/*.hwh
+overlays/mini_accel/*.rpt
+
+# Python and notebooks
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Operating-system/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
