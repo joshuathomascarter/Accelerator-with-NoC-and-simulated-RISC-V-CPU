@@ -53,6 +53,23 @@ module pynq_axi_e2e_case #(
         end
     endtask
 
+    function automatic logic [31:0] weight_word(input int i);
+        return 32'h0403_0201 + (i * 32'h0404_0404);
+    endfunction
+
+    function automatic logic [31:0] act_word(input int i);
+        return 32'hFF02_0101 + i;   // lanes (1+i, 1, 2, -1)
+    endfunction
+
+    // Signed dot product of the four INT8 lanes: what one tile must return.
+    function automatic logic [31:0] dot4(input logic [31:0] w, input logic [31:0] a);
+        int acc = 0;
+        for (int lane = 0; lane < 4; lane++) begin
+            acc += $signed(w[lane*8 +: 8]) * $signed(a[lane*8 +: 8]);
+        end
+        return acc;
+    endfunction
+
     initial begin
         logic [31:0] status, result, error_word;
         int timeout;
@@ -67,10 +84,10 @@ module pynq_axi_e2e_case #(
         axi_write(PYNQ_REG_CTRL, 32'h2);
         axi_write(PYNQ_REG_TILE_COUNT, RUN_TILES);
         for (int i = 0; i < RUN_TILES; i++) begin
-            axi_write(PYNQ_REG_WEIGHT_DATA, 32'h0403_0201 + (i * 32'h0404_0404));
+            axi_write(PYNQ_REG_WEIGHT_DATA, weight_word(i));
         end
         for (int i = 0; i < RUN_TILES; i++) begin
-            axi_write(PYNQ_REG_ACT_DATA, 32'h0000_0101 + i);
+            axi_write(PYNQ_REG_ACT_DATA, act_word(i));
         end
         axi_write(PYNQ_REG_CTRL, 32'h5);
 
@@ -87,7 +104,10 @@ module pynq_axi_e2e_case #(
             axi_read(PYNQ_REG_STATUS, status);
             if (!status[PYNQ_STATUS_RESULT_VALID_BIT]) $fatal(1, "Result %0d was not valid", i);
             axi_read(PYNQ_REG_RESULT, result);
-            if (^result === 1'bx) $fatal(1, "Result %0d contains X", i);
+            if (result !== dot4(weight_word(i), act_word(i))) begin
+                $fatal(1, "Tile %0d returned %08h, expected %08h", i, result,
+                       dot4(weight_word(i), act_word(i)));
+            end
         end
         axi_read(PYNQ_REG_STATUS, status);
         if (status[PYNQ_STATUS_RESULT_VALID_BIT]) $fatal(1, "Result FIFO did not drain");

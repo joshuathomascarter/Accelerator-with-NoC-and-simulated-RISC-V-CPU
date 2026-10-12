@@ -1,111 +1,174 @@
-# Mini NoC Accelerator with Simulated RISC-V CPU and PYNQ-Z2 AXI Control
+# Mini NoC Accelerator + RISC-V-style CPU on a PYNQ-Z2
 
-This repository contains a small SystemVerilog accelerator built around four
-2x2 processing-element tiles connected by a 2x2 network-on-chip. A compact
-RISC-V-style CPU is included for simulation and MMIO verification. On a
-PYNQ-Z2 board, the custom CPU is not synthesized; the Zynq ARM processor
-controls the accelerator through AXI-Lite.
+An INT8 neural-network accelerator and a small CPU, both written in
+SystemVerilog and running together on a PYNQ-Z2 FPGA board. The CPU runs a
+two-layer neural network by itself: it streams weights and inputs into the
+accelerator, collects the results, applies the activation function, and shows
+the predicted digit on the board's LEDs.
 
-## Architecture
+- **Accelerator:** four compute tiles on a 2x2 network-on-chip. Each tile holds
+  a 2x2 grid of multiply-accumulate units and returns one 4-element signed
+  8-bit dot product per run.
+- **CPU:** a single-cycle RISC-V-style core (an RV32I subset) with its own
+  instruction and data memory. It controls the accelerator through
+  memory-mapped registers.
+- **Host:** the PC (over the USB cable) or the board's ARM processor loads the
+  program and data, then either lets the CPU run or drives the accelerator
+  directly.
 
-The accelerator consists of:
+## Results on the board
 
-- four compute tiles arranged in a 2x2 grid;
-- a 2x2 systolic processing-element array in each tile;
-- signed INT8 multiply-accumulate datapaths with 32-bit accumulators;
-- packetized clear, weight, start, compute, reduce, result, and done messages;
-- XY-routed request and response traffic over a simple grid NoC;
-- a scheduler that sends work to each selected tile;
-- ordered result storage for AXI-Lite reads.
+All results below were measured on the PYNQ-Z2. Each one was checked against a
+software model of the same 8-bit network. The FPGA's 32-bit output scores had
+to match it exactly, not only the predicted class.
 
-Two host paths are provided:
+| Dataset | Network | Who drives the accelerator | Test inputs | Accuracy | Exact match with software |
+|---|---|---|---|---|---|
+| MNIST handwritten digits, reduced to 8x8 | 64 -> 32 -> 10 | **the CPU on the FPGA** | 10,000 (full test set) | 96.0 % | 10,000 / 10,000 |
+| Handwritten digits 8x8 (scikit-learn) | 64 -> 10 | PC over USB | 450 (full test set) | 96.0 % | 450 / 450 |
+| Iris flowers | 4 -> 3 | PC over USB | 38 (full test set) | 97.4 % | 38 / 38 |
 
-1. The simulated CPU issues loads and stores through `cpu_mmio_bridge` for RTL
-   verification.
-2. `pynq_accel_top` connects the Zynq processing system's AXI GP0 master to the
-   real accelerator for the PYNQ-Z2 implementation.
+The same networks in 32-bit floating point score 96.1 %, 96.0 % and 97.4 %, so
+the 8-bit versions lose almost no accuracy.
 
-## Current operation
+**Who drives the accelerator matters.** One MNIST image needs 148 accelerator
+runs. When the PC drives each run over the USB debug cable, every register
+access is a USB round trip, and an image takes about 4.4 s. When the CPU on the
+FPGA drives the runs, the PC only sends the 16 words of the image and reads
+back the answer: **43 images per second, about 190x faster on the same board.**
+In simulation, the CPU itself needs 22,650 clock cycles per image, which is
+0.50 ms at 45 MHz.
 
-For each selected tile, software writes one packed 32-bit weight word and one
-packed 32-bit activation word. Each word contains four signed INT8 lanes. A
-start command causes the scheduler to send the data through the NoC, execute
-the tile, and return one packed 32-bit result. Results are read in tile order.
+## Speed compared with software
 
-The AXI-Lite register map is documented in
-[`docs/PYNQ_REGISTER_MAP.md`](docs/PYNQ_REGISTER_MAP.md). The main sequence is:
+The accelerator is correct, but this version is not faster than a desktop PC.
+Times are per image for the MNIST-8 network. The full tables are in
+[docs/RESULTS.md](docs/RESULTS.md).
 
-1. clear the accelerator;
-2. write the tile count;
-3. write one weight word per tile;
-4. write one activation word per tile;
-5. start a final-layer run;
-6. poll the status register;
-7. read one result per tile.
+| Implementation | Time per image |
+|---|---|
+| Pure Python loops on the PC | about 400 µs |
+| NumPy on the PC, one image at a time | 51 µs |
+| NumPy on the PC, whole test set at once | 2.4 µs |
+| FPGA accelerator compute only (45 MHz) | 301 µs |
+| FPGA, the CPU on the FPGA drives every run (45 MHz) | 503 µs |
 
-## Repository layout
+Reasons, in order of impact:
+
+- The four tiles run one after another instead of at the same time.
+- Weights are resent for every run instead of staying in the tiles.
+- The CPU is single-cycle, which limits the clock to 45 MHz.
+
+Running the tiles in parallel, keeping weights in the tiles, and pipelining the
+CPU are the next steps.
+
+## How it works
+
+1. **One tile, one dot product.** A tile receives one 32-bit weight word and
+   one 32-bit input word, each holding four signed 8-bit numbers. Each of its
+   four multiply-accumulate units multiplies one pair. The tile adds the four
+   products and returns a signed 32-bit result.
+2. **One run, up to four tiles.** The weight and input words are written, then
+   the run is started. A scheduler sends each tile its packets (clear, weight,
+   start, compute, reduce) over the network-on-chip. The tiles send their
+   results back, and they are read in tile order.
+3. **A layer.** A layer with 64 inputs and 32 outputs is split into groups of
+   4 inputs: 16 groups x 32 outputs = 512 dot products, four per run. The
+   partial sums are added and the bias is applied.
+4. **Between layers.** Negative values are set to zero (ReLU), and each value is
+   shifted right and limited to 0-127, so the next layer gets 8-bit inputs
+   again.
+5. **The CPU firmware** does steps 3 and 4 for both layers, then picks the
+   highest score. It is 151 instructions, written in assembly
+   ([software/mini_accel/firmware.py](software/mini_accel/firmware.py)) and
+   assembled by a small assembler for this CPU
+   ([software/mini_accel/rv32.py](software/mini_accel/rv32.py)).
+
+Register map and CPU memory map: [docs/PYNQ_REGISTER_MAP.md](docs/PYNQ_REGISTER_MAP.md).
+
+## FPGA build
+
+| | |
+|---|---|
+| Device | Zynq-7020 (xc7z020clg400-1) on a TUL PYNQ-Z2 |
+| Clock | 45 MHz, timing met with 1.4 ns of slack |
+| Logic used | 8,608 LUTs (16 %), 4,683 flip-flops (4 %), no DSP or block RAM |
+| Power | 1.7 W total, including the ARM processing system |
+| Tools | Vivado 2026.1 |
+
+## Running it
+
+Requirements: Vivado (any version with Zynq-7000 support), and Python 3 with
+`numpy` and `scikit-learn`. The MNIST data (about 15 MB) is downloaded the
+first time it is needed.
+
+**Tests.** Every testbench, 300 random accelerator runs compared with a Python
+model, and the CPU running the network on 5 images:
 
 ```text
-accelerator/   NoC, scheduler, storage, tiles, PE arrays, and Python software
-cpu/           Simulated RISC-V-style CPU and MMIO bridge
-rtl/           PYNQ AXI-Lite wrapper, result readback, and board accelerator top
-Tests/         CPU, NoC, accelerator, AXI-Lite, and end-to-end testbenches
-Vivado/        PYNQ-Z2 XSIM and block-design/bitstream scripts
-docs/          Register map and verification results
-notebooks/     MNIST and digit-drawing software prototypes
-scripts/       Local regression helper
-overlays/      Destination and instructions for generated PYNQ overlay files
+python scripts/run_regression.py
 ```
 
-## Verification
-
-The completed checks are recorded in
-[`docs/VERIFICATION_RESULTS.md`](docs/VERIFICATION_RESULTS.md). They include:
-
-- standalone AXI-Lite register simulation;
-- Verilator elaboration and lint of the complete PYNQ hierarchy;
-- Yosys/Slang synthesis checking;
-- synthesized-netlist simulations for one-tile and four-tile AXI transactions;
-- Python syntax checks for the board driver and smoke test.
-
-To repeat the board-facing simulations with Vivado XSIM:
-
-```text
-vivado -mode batch -source Vivado/run_preflight_sim.tcl
-```
-
-## Building the PYNQ-Z2 overlay
-
-Vivado with Zynq-7000 device support is required. Run:
+**Build the bitstream.** Writes `overlays/mini_accel/mini_accel.bit` and reports.
+The build stops without writing the bitstream if timing is not met:
 
 ```text
 vivado -mode batch -source Vivado/build_pynq_z2.tcl
 ```
 
-The script creates a Zynq processing-system block design, connects GP0 AXI to
-the accelerator, assigns address `0x43C00000`, runs implementation, and writes
-the following files under `overlays/mini_accel/`:
+**Run on the board from a PC.** Power the board and connect the micro-USB
+cable. These program the FPGA over JTAG, so nothing needs to be copied to the
+board:
 
-- `mini_accel.bit`
-- `mini_accel.hwh`
-- `utilization.rpt`
-- `timing_summary.rpt`
-
-Copy the bitstream, HWH file, `pynq_driver.py`, and `pynq_smoke_test.py` to the
-PYNQ-Z2. On the board, run:
-
-```bash
-python3 pynq_smoke_test.py --bitstream mini_accel.bit --tiles 4
+```text
+python software/run_dataset.py --dataset mnist8 --backend cpu-jtag --samples 0   # the CPU runs the network
+python software/run_dataset.py --dataset digits --backend jtag --samples 0       # the PC drives every run
 ```
 
-## Limitations
+Other backends: `model` (Python model only), `xsim` and `cpu-xsim` (simulation
+with exact cycle counts), and `pynq` and `cpu-pynq` (run on the board's ARM; see
+`scripts/make_board_bundle.py`).
 
-- The custom CPU is a small simulation model, not the processor used on the
-  physical board.
-- The current board transaction accepts one packed weight word and one packed
-  activation word per tile per run.
-- Full 28x28 MNIST inference is not implemented in hardware. It requires
-  multi-word weight storage and accumulation across all 784 input features.
-- AXI DMA is not implemented; board communication currently uses AXI-Lite.
-- Vivado timing closure and physical-board behavior must be checked with the
-  generated implementation reports and the PYNQ-Z2 board.
+**Draw a digit and classify it on the board:**
+
+```text
+python software/draw_digit_demo.py
+```
+
+Draw a digit with the mouse and press Run. You can choose who drives the
+accelerator:
+
+- **PC over USB:** the window lists every run. It shows the weight and input
+  words sent to the board and the result each tile returns.
+- **The CPU on the FPGA:** the PC sends only the image. The CPU runs both
+  layers and returns the answer.
+
+Either way, the board's 10 scores are shown next to the scores computed in
+software, and the predicted digit is shown in binary on the board's four LEDs.
+Use `--backend model` to try the window without a board.
+
+## Board LEDs
+
+When the CPU is running, the LEDs show the last predicted digit in binary. When
+the PC drives the accelerator:
+
+| LED | Meaning |
+|---|---|
+| LD3 | last run finished |
+| LD2 | results waiting to be read |
+| LD1 | accelerator busy |
+| LD0 | bus protocol error |
+
+## Repository layout
+
+```text
+accelerator/   network-on-chip, scheduler, tiles, multiply-accumulate units
+cpu/           the RISC-V-style CPU and its MMIO bridge
+rtl/           AXI-Lite registers, accelerator core, board top level (pynq_soc_top)
+software/      Python driver, assembler, CPU firmware, dataset runner, digit demo
+scripts/       test runner, benchmark, board bundle
+Tests/         testbenches
+Vivado/        block design and bitstream build script, pin constraints
+overlays/      generated bitstream and reports (not committed)
+docs/          register map, verification results, speed results
+```

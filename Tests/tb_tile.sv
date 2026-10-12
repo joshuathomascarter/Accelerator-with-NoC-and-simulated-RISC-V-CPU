@@ -96,39 +96,6 @@ module tb_tile;
         end
     endtask
 
-    function automatic logic signed [DATA_WIDTH-1:0] quantize_i8(
-        input logic signed [RESULT_WIDTH-1:0] value
-    );
-        logic signed [RESULT_WIDTH-1:0] max_i8;
-        logic signed [RESULT_WIDTH-1:0] min_i8;
-        begin
-            max_i8 = RESULT_WIDTH'(127);
-            min_i8 = -RESULT_WIDTH'(128);
-
-            if (value > max_i8) begin
-                quantize_i8 = DATA_WIDTH'(127);
-            end else if (value < min_i8) begin
-                quantize_i8 = DATA_WIDTH'(-128);
-            end else begin
-                quantize_i8 = value[DATA_WIDTH-1:0];
-            end
-        end
-    endfunction
-
-    function automatic logic [RESULT_WIDTH-1:0] packed_i8_results(
-        input logic [RESULT_WIDTH-1:0] b0,
-        input logic [RESULT_WIDTH-1:0] b1,
-        input logic [RESULT_WIDTH-1:0] b2,
-        input logic [RESULT_WIDTH-1:0] b3
-    );
-        return {
-            quantize_i8($signed(b3)),
-            quantize_i8($signed(b2)),
-            quantize_i8($signed(b1)),
-            quantize_i8($signed(b0))
-        };
-    endfunction
-
     initial begin
         noc_packet_t pkt;
         logic [RESULT_WIDTH-1:0] expected_payload;
@@ -180,7 +147,7 @@ module tb_tile;
         repeat (3) @(posedge clk);
 
         pkt.payload_type  = NOC_PKT_COMPUTE;
-        pkt.payload       = 32'h0101_0101;
+        pkt.payload       = 32'h05FE_0302;   // lanes 2, 3, -2, 5
         $display("Running compute with packed activation NoC packet");
         send_local_packet(pkt);
         repeat (5) @(posedge clk);
@@ -203,12 +170,8 @@ module tb_tile;
             response_wait++;
         end
 
-        expected_payload = packed_i8_results(
-            pe_results[0*RESULT_WIDTH +: RESULT_WIDTH],
-            pe_results[1*RESULT_WIDTH +: RESULT_WIDTH],
-            pe_results[2*RESULT_WIDTH +: RESULT_WIDTH],
-            pe_results[3*RESULT_WIDTH +: RESULT_WIDTH]
-        );
+        // 1*2 + 2*3 + 3*(-2) + 4*5 = 22
+        expected_payload = 32'd22;
 
         $display("done=%b", done);
         $display("overflow_hazard=%b", overflow_hazard);
@@ -241,7 +204,7 @@ module tb_tile;
         end
 
         if (deliver_packet.payload !== expected_payload) begin
-            $fatal(1, "Response payload 0x%08h did not match expected packed INT8 value 0x%08h",
+            $fatal(1, "Response payload 0x%08h did not match expected dot product 0x%08h",
                 deliver_packet.payload, expected_payload);
         end
 

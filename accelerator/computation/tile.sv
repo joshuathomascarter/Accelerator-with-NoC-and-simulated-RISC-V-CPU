@@ -41,8 +41,9 @@ module tile #(
 
     logic                    start_req;
     logic                    clear_req;
-    logic                    compute_en_req;
+    logic [M*N-1:0]          compute_en_req;
     logic                    reduce_en_req;
+    logic                    reduce_pending_q;
     logic [DATA_WIDTH-1:0]    activation_data_req;
 
     logic                    inject_fire;
@@ -73,29 +74,11 @@ module tile #(
     logic                    scratch_activations_valid;
     logic                    scratch_result_valid;
 
-    logic [RESULT_WIDTH-1:0]  pe0_result;
-    logic [RESULT_WIDTH-1:0]  pe1_result;
-    logic [RESULT_WIDTH-1:0]  pe2_result;
-    logic [RESULT_WIDTH-1:0]  pe3_result;
     logic [RESULT_WIDTH-1:0]  result_word;
     logic [M*N-1:0]          overflow_hazard_i;
     logic [M*N*RESULT_WIDTH-1:0] pe_results_i;
     logic                    done_i;
 
-    
-function automatic logic signed [DATA_WIDTH-1:0] quantize_i8(
-    input logic signed [RESULT_WIDTH-1:0] value
-);
-    localparam logic signed [RESULT_WIDTH-1:0] MAX_VAL = (1 <<< (DATA_WIDTH-1)) - 1;
-    localparam logic signed [RESULT_WIDTH-1:0] MIN_VAL = -(1 <<< (DATA_WIDTH-1));
-
-    if (value > MAX_VAL) 
-        return MAX_VAL[DATA_WIDTH-1:0];
-    else if (value < MIN_VAL) 
-        return MIN_VAL[DATA_WIDTH-1:0];
-    else 
-        return value[DATA_WIDTH-1:0];
-endfunction
 
     assign inject_packet_is_local = is_local_dest(TILE_X_C, TILE_Y_C, inject_packet);
     assign inject_ready = 1'b1;
@@ -108,8 +91,8 @@ endfunction
 
         start_req         = start;
         clear_req         = clear;
-        compute_en_req    = compute_en;
-        reduce_en_req     = reduce_en;
+        compute_en_req    = {(M*N){compute_en}};
+        reduce_en_req     = reduce_en || (reduce_pending_q && !unpack_compute_active_q);
         activation_data_req = activation_data;
         weight_col_load_req = '0;
         row_weight_data_req = '0;
@@ -131,7 +114,11 @@ endfunction
                     // The packed payload is replayed locally as compute pulses.
                 end
                 NOC_PKT_REDUCE: begin
-                    reduce_en_req = 1'b1;
+                    // Reduce waits until every activation lane has been
+                    // replayed; reduce_pending_q holds it until then.
+                    if (!unpack_compute_active_q) begin
+                        reduce_en_req = 1'b1;
+                    end
                 end
 
                 default: begin
@@ -148,25 +135,22 @@ endfunction
             end
         end
 
+        // Replay activation lane i into PE i only, so the tile accumulates
+        // sum_i(weight_i * activation_i): a 4-lane INT8 dot product.
         if (unpack_compute_active_q) begin
-            compute_en_req      = 1'b1;
+            compute_en_req = '0;
+            compute_en_req[activation_lane_q] = 1'b1;
             activation_data_req = scratch_activation_rd_data;
         end
     end
 
-    assign pe0_result = pe_results_i[0*RESULT_WIDTH +: RESULT_WIDTH];
-    assign pe1_result = pe_results_i[1*RESULT_WIDTH +: RESULT_WIDTH];
-    assign pe2_result = pe_results_i[2*RESULT_WIDTH +: RESULT_WIDTH];
-    assign pe3_result = pe_results_i[3*RESULT_WIDTH +: RESULT_WIDTH];
-
-    // Quantize each PE accumulator to INT8 and pack four tile outputs into one
-    // 32-bit packet. This makes loopback data naturally become 4 activations.
-    assign result_word = {
-        quantize_i8(pe3_result),
-        quantize_i8(pe2_result),
-        quantize_i8(pe1_result),
-        quantize_i8(pe0_result)
-    };
+    // Reduce: sum the PE accumulators into one signed 32-bit result word.
+    always_comb begin
+        result_word = '0;
+        for (int i = 0; i < M*N; i++) begin
+            result_word = result_word + pe_results_i[i*RESULT_WIDTH +: RESULT_WIDTH];
+        end
+    end
 
     // Outbound response packet. This is a tiny status/result return path so the
     // tile can hand something back to the mesh after a compute completes.
@@ -245,7 +229,15 @@ endfunction
             weight_lane_q <= '0;
             activation_lane_q <= '0;
             weight_preload_col_q <= '0;
+            reduce_pending_q <= 1'b0;
         end else begin
+            if (inject_fire && inject_packet.payload_type == NOC_PKT_REDUCE &&
+                unpack_compute_active_q) begin
+                reduce_pending_q <= 1'b1;
+            end else if (reduce_pending_q && !unpack_compute_active_q) begin
+                reduce_pending_q <= 1'b0;
+            end
+
             if (inject_fire) begin
                 last_src_valid_q <= 1'b1;
                 last_src_x_q     <= inject_packet.src_x;

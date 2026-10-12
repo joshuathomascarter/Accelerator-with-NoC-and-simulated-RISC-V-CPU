@@ -43,3 +43,8 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local tool installs and side checkouts
+Sim/iverilog/
+.publish_repo/
+.pr_body.md

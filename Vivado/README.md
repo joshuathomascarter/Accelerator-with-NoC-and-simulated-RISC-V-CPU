@@ -1,33 +1,25 @@
-# PYNQ-Z2 build and simulation
+# PYNQ-Z2 build
 
-The custom simulation CPU is not part of the board design. The Zynq ARM
-processing system controls `pynq_accel_top` through its GP0 AXI-Lite master.
+`build_pynq_z2.tcl` creates a Zynq block design: the PS7, plus `pynq_soc_top`
+(the accelerator and the project CPU) on GP0 AXI-Lite at `0x43C00000`, 8 KB.
+It runs synthesis, implementation and bitstream generation, then writes the
+following to `overlays/mini_accel/`:
 
-Run the board-facing simulations first:
-
-```text
-vivado -mode batch -source Vivado/run_preflight_sim.tcl
-```
-
-Then create the Zynq block design, synthesize, implement, and export the PYNQ
-overlay:
+- `mini_accel.bit`, `mini_accel.hwh`
+- `utilization.rpt`, `utilization_hier.rpt`, `timing_summary.rpt`, `power.rpt`
 
 ```text
+set MINI_ACCEL_VIVADO_DIR=C:\mini_accel_vivado
 vivado -mode batch -source Vivado/build_pynq_z2.tcl
 ```
 
-Successful implementation writes these files to `overlays/mini_accel/`:
+`MINI_ACCEL_VIVADO_DIR` is optional. Set it when the repo lives in a synced
+folder such as OneDrive, which locks Vivado's cache files mid-build.
 
-- `mini_accel.bit`
-- `mini_accel.hwh`
-- `utilization.rpt`
-- `timing_summary.rpt`
+The fabric clock (FCLK0) is 45 MHz, set by the single-cycle CPU path. The script
+stops without copying the bitstream if timing is not met. If the PYNQ-Z2 board files are installed,
+the PS7 board preset is applied. Without them the default PS7 configuration is
+used, which is fine for an overlay: PYNQ's Linux image has already configured
+the PS.
 
-The accelerator is mapped at `0x43C00000`. PYNQ normally obtains that address
-from the HWH file, so Python software should not hard-code it.
-
-The current hardware transaction processes one packed INT8x4 weight word and
-one packed INT8x4 activation word per selected tile. It proves the complete ARM
-AXI -> NoC -> systolic tile -> AXI result path. Processing a full 784-feature
-MNIST image requires a later multi-word accumulation protocol or DMA design;
-the existing MNIST exporter alone does not add that missing hardware behavior.
+Simulate the RTL before building with `python scripts/run_regression.py`.

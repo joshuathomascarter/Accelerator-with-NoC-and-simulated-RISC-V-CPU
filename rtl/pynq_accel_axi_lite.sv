@@ -52,7 +52,16 @@ module pynq_accel_axi_lite #(
     output logic                      packet_valid,
     output logic [AXI_DATA_W-1:0]     dma_src_addr,
     output logic [AXI_DATA_W-1:0]     dma_dst_addr,
-    output logic [AXI_DATA_W-1:0]     dma_length
+    output logic [AXI_DATA_W-1:0]     dma_length,
+
+    // Extension port: aligned accesses at byte offset 0x100 and above go here
+    // (only reachable when AXI_ADDR_W > 8). Reads are combinational from
+    // ext_rd_addr; writes are a one-cycle ext_wr_en pulse with full-word data.
+    output logic                      ext_wr_en,
+    output logic [AXI_ADDR_W-1:0]     ext_wr_addr,
+    output logic [AXI_DATA_W-1:0]     ext_wr_data,
+    output logic [AXI_ADDR_W-1:0]     ext_rd_addr,
+    input  logic [AXI_DATA_W-1:0]     ext_rd_data
 );
     import pynq_accel_pkg::*;
 
@@ -94,6 +103,10 @@ module pynq_accel_axi_lite #(
             end
             return merged;
         end
+    endfunction
+
+    function automatic logic is_ext_addr(input logic [AXI_ADDR_W-1:0] addr);
+        return (AXI_ADDR_W > 8) && ((addr >> 8) != 0);
     endfunction
 
     function automatic logic is_known_addr(input logic [AXI_ADDR_W-1:0] addr);
@@ -201,8 +214,10 @@ module pynq_accel_axi_lite #(
     assign write_fire = aw_pending_q && w_pending_q && !s_axi_bvalid;
     assign read_fire  = s_axi_arvalid && s_axi_arready;
 
-    assign write_addr_valid = (awaddr_q[1:0] == 2'b00) && is_known_addr(awaddr_q);
-    assign read_addr_valid  = (s_axi_araddr[1:0] == 2'b00) && is_known_addr(s_axi_araddr);
+    assign write_addr_valid = (awaddr_q[1:0] == 2'b00) && (is_known_addr(awaddr_q) || is_ext_addr(awaddr_q));
+    assign read_addr_valid  = (s_axi_araddr[1:0] == 2'b00) &&
+                              (is_known_addr(s_axi_araddr) || is_ext_addr(s_axi_araddr));
+    assign ext_rd_addr      = s_axi_araddr;
 
     assign accel_final_layer    = ctrl_q[PYNQ_CTRL_FINAL_LAYER_BIT];
     assign led_mirror           = led_mirror_q[3:0];
@@ -242,7 +257,11 @@ module pynq_accel_axi_lite #(
             accel_act_wr_en      <= 1'b0;
             accel_result_rd_en   <= 1'b0;
             packet_valid         <= 1'b0;
+            ext_wr_en            <= 1'b0;
+            ext_wr_addr          <= '0;
+            ext_wr_data          <= '0;
         end else begin
+            ext_wr_en          <= 1'b0;
             accel_start        <= 1'b0;
             accel_clear        <= 1'b0;
             accel_weight_wr_en <= 1'b0;
@@ -327,6 +346,12 @@ module pynq_accel_axi_lite #(
                     endcase
                 end
 
+                if (write_addr_valid && is_ext_addr(awaddr_q)) begin
+                    ext_wr_en   <= 1'b1;
+                    ext_wr_addr <= awaddr_q;
+                    ext_wr_data <= wdata_q;
+                end
+
                 aw_pending_q <= 1'b0;
                 w_pending_q  <= 1'b0;
             end
@@ -338,7 +363,8 @@ module pynq_accel_axi_lite #(
             if (read_fire) begin
                 s_axi_rvalid <= 1'b1;
                 s_axi_rresp  <= read_addr_valid ? AXI_RESP_OKAY : AXI_RESP_SLVERR;
-                s_axi_rdata  <= read_addr_valid ? read_data_for_addr(s_axi_araddr) : '0;
+                s_axi_rdata  <= !read_addr_valid ? '0 :
+                                is_ext_addr(s_axi_araddr) ? ext_rd_data : read_data_for_addr(s_axi_araddr);
 
                 if (read_addr_valid && (s_axi_araddr == PYNQ_REG_RESULT)) begin
                     accel_result_rd_en <= 1'b1;

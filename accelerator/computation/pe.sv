@@ -13,7 +13,6 @@ module pe #(
 
     input  logic                   compute_en,
     input  logic [DATA_WIDTH-1:0]  activation_in,
-    output logic [DATA_WIDTH-1:0]  activation_out,
 
     output logic [RESULT_WIDTH-1:0] result
 );
@@ -31,16 +30,6 @@ module pe #(
     end
 
     assign weight_out = weight_reg;
-
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            activation_out <= '0;
-        end else if (clear) begin
-            activation_out <= '0;
-        end else if (compute_en) begin
-            activation_out <= activation_in;
-        end
-    end
 
     mac #(
         .DATA_WIDTH(DATA_WIDTH),

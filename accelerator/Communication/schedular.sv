@@ -82,8 +82,6 @@ module scheduler #(
         DONE
     } state_t;
 
-    localparam int PE_COUNT  = M * N;
-    localparam int ACT_ELEMS = N;
 
     state_t state;
 
@@ -159,9 +157,14 @@ module scheduler #(
             result_wr_en      <= 1'b0;
             loopback_start    <= 1'b0;
             output_valid      <= 1'b0;
-            cmd_valid         <= 1'b0;
-            cmd_packet        <= '0;
             status_ready      <= 1'b0;
+
+            // cmd_valid/cmd_packet are held until the mesh accepts the packet.
+            // Each send state presents its packet when the port is empty and
+            // advances on the cycle the handshake completes.
+            if (cmd_valid && cmd_ready) begin
+                cmd_valid <= 1'b0;
+            end
 
             case (state)
                 IDLE: begin
@@ -174,54 +177,60 @@ module scheduler #(
                 end
 
                 SEND_CLEAR: begin
-                    cmd_valid  <= 1'b1;
-                    cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_CLEAR, '0);
+                    // Address this tile's operands early so synchronous SRAMs
+                    // have valid read data by the time the packets are built.
+                    weight_bank_sel <= current_bank;
+                    act_bank_sel    <= current_bank;
+                    weight_rd_en    <= 1'b1;
+                    act_rd_en       <= 1'b1;
+                    weight_rd_addr  <= ADDR_WIDTH'(tile_cnt);
+                    act_rd_addr     <= ADDR_WIDTH'(tile_cnt);
 
-                    if (cmd_ready) begin
-                        state           <= LOAD_WEIGHTS;
+                    if (!cmd_valid) begin
+                        cmd_valid  <= 1'b1;
+                        cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_CLEAR, '0);
+                    end else if (cmd_ready) begin
+                        state <= LOAD_WEIGHTS;
                     end
                 end
 
                 LOAD_WEIGHTS: begin
-                    weight_bank_sel <= current_bank;
-                    weight_rd_en    <= 1'b1;
-                    weight_rd_addr  <= ADDR_WIDTH'(tile_cnt);
-                    cmd_valid       <= 1'b1;
-                    cmd_packet      <= make_cmd_packet(tile_cnt, NOC_PKT_WEIGHT,
-                                                       noc_payload_t'(weight_rd_data));
-
-                    if (cmd_ready) begin
+                    weight_rd_en <= 1'b1;
+                    if (!cmd_valid) begin
+                        cmd_valid  <= 1'b1;
+                        cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_WEIGHT,
+                                                      noc_payload_t'(weight_rd_data));
+                    end else if (cmd_ready) begin
                         state <= SEND_START;
                     end
                 end
 
                 SEND_START: begin
-                    cmd_valid  <= 1'b1;
-                    cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_START, '0);
-
-                    if (cmd_ready) begin
+                    act_rd_en <= 1'b1;
+                    if (!cmd_valid) begin
+                        cmd_valid  <= 1'b1;
+                        cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_START, '0);
+                    end else if (cmd_ready) begin
                         state <= LOAD_ACTS;
                     end
                 end
 
                 LOAD_ACTS: begin
-                    act_bank_sel <= current_bank;
-                    act_rd_en    <= 1'b1;
-                    act_rd_addr  <= ADDR_WIDTH'(tile_cnt);
-                    cmd_valid    <= 1'b1;
-                    cmd_packet   <= make_cmd_packet(tile_cnt, NOC_PKT_COMPUTE,
-                                                    noc_payload_t'(act_rd_data));
-                    
-                    if (cmd_ready) begin
+                    act_rd_en <= 1'b1;
+                    if (!cmd_valid) begin
+                        cmd_valid  <= 1'b1;
+                        cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_COMPUTE,
+                                                      noc_payload_t'(act_rd_data));
+                    end else if (cmd_ready) begin
                         state <= SEND_REDUCE;
                     end
                 end
 
                 SEND_REDUCE: begin
-                    cmd_valid  <= 1'b1;
-                    cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_REDUCE, '0);
-
-                    if (cmd_ready) begin
+                    if (!cmd_valid) begin
+                        cmd_valid  <= 1'b1;
+                        cmd_packet <= make_cmd_packet(tile_cnt, NOC_PKT_REDUCE, '0);
+                    end else if (cmd_ready) begin
                         state <= WAIT_TILE_DONE;
                     end
                 end

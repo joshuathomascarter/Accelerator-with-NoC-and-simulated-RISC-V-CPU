@@ -12,7 +12,7 @@ module tb_systolic_array;
 
     logic start;
     logic clear;
-    logic compute_en;
+    logic [M*N-1:0] compute_en;
     logic reduce_en;
 
     logic [M*DATA_WIDTH-1:0] row_weight_data;
@@ -79,17 +79,15 @@ module tb_systolic_array;
         end
     endtask
 
-    task automatic run_compute(input int cycles, input logic [DATA_WIDTH-1:0] value);
-        int i;
+    // Present one activation for one cycle to the PEs selected by pe_mask.
+    task automatic compute_lane(input logic [M*N-1:0] pe_mask, input logic [DATA_WIDTH-1:0] value);
         begin
             @(negedge clk);
             activation_data = value;
-            compute_en      = 1'b1;
-            for (i = 0; i < cycles; i = i + 1) begin
-                @(posedge clk);
-            end
+            compute_en      = pe_mask;
+            @(posedge clk);
             @(negedge clk);
-            compute_en = 1'b0;
+            compute_en = '0;
         end
     endtask
 
@@ -99,7 +97,7 @@ module tb_systolic_array;
         clear          = 1'b0;
         row_weight_data = '0;
         weight_col_load = '0;
-        compute_en     = 1'b0;
+        compute_en     = '0;
         reduce_en      = 1'b0;
         activation_data = '0;
 
@@ -121,40 +119,33 @@ module tb_systolic_array;
             $fatal(1, "Skewed preload did not place weights into expected PEs");
         end
 
-        $display("Starting compute with activation=1 for 4 cycles");
-        @(negedge clk);
-        start = 1'b1;
-        @(posedge clk);
-        @(negedge clk);
-        start = 1'b0;
-        run_compute(4, 8'd1);
+        // Lane i drives PE i only: activations 5, -3, 7, 2 against weights 1..4.
+        $display("Replaying one activation per PE");
+        compute_lane(4'b0001, 8'd5);
+        compute_lane(4'b0010, -8'sd3);
+        compute_lane(4'b0100, 8'd7);
+        compute_lane(4'b1000, 8'd2);
 
         @(negedge clk);
         reduce_en = 1'b1;
         @(posedge clk);
+        #1;
+        if (!done) $fatal(1, "done did not follow reduce_en");
         @(negedge clk);
         reduce_en = 1'b0;
-        @(posedge clk);
 
-        $display("internal pe00 weight=%0d act_in=%0d act_out=%0d",
-            dut.gen_row[0].gen_col[0].u_pe.weight_reg,
-            dut.gen_row[0].gen_col[0].u_pe.activation_in,
-            dut.gen_row[0].gen_col[0].u_pe.activation_out);
-        $display("internal pe01 weight=%0d act_in=%0d act_out=%0d",
-            dut.gen_row[0].gen_col[1].u_pe.weight_reg,
-            dut.gen_row[0].gen_col[1].u_pe.activation_in,
-            dut.gen_row[0].gen_col[1].u_pe.activation_out);
-        $display("internal pe00 result=%0d", dut.gen_row[0].gen_col[0].u_pe.result);
-        $display("internal pe01 result=%0d", dut.gen_row[0].gen_col[1].u_pe.result);
-        $display("internal pe10 result=%0d", dut.gen_row[1].gen_col[0].u_pe.result);
-        $display("internal pe11 result=%0d", dut.gen_row[1].gen_col[1].u_pe.result);
-        $display("done=%b", done);
-        $display("overflow_hazard=%b", overflow_hazard);
-        $display("pe_results[0]=%0d", pe_results[0*RESULT_WIDTH +: RESULT_WIDTH]);
-        $display("pe_results[1]=%0d", pe_results[1*RESULT_WIDTH +: RESULT_WIDTH]);
-        $display("pe_results[2]=%0d", pe_results[2*RESULT_WIDTH +: RESULT_WIDTH]);
-        $display("pe_results[3]=%0d", pe_results[3*RESULT_WIDTH +: RESULT_WIDTH]);
+        for (int i = 0; i < M*N; i++) begin
+            $display("pe_results[%0d]=%0d", i, $signed(pe_results[i*RESULT_WIDTH +: RESULT_WIDTH]));
+        end
+        if ($signed(pe_results[0*RESULT_WIDTH +: RESULT_WIDTH]) !== 5 ||
+            $signed(pe_results[1*RESULT_WIDTH +: RESULT_WIDTH]) !== -6 ||
+            $signed(pe_results[2*RESULT_WIDTH +: RESULT_WIDTH]) !== 21 ||
+            $signed(pe_results[3*RESULT_WIDTH +: RESULT_WIDTH]) !== 8) begin
+            $fatal(1, "PE accumulators do not match weight*activation per lane");
+        end
+        if (overflow_hazard !== '0) $fatal(1, "Unexpected overflow hazard");
 
+        $display("Systolic array test passed");
         $finish;
     end
 endmodule

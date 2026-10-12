@@ -8,9 +8,9 @@ All registers are 32 bits wide and require aligned word accesses.
 | `0x00` | `CTRL` | RW | bit0=start, bit1=clear, bit2=final_layer | Host control register. `start` and `clear` are pulse-style commands. |
 | `0x04` | `STATUS` | RO | bit0=busy, bit1=done, bit2=result_valid, bit3=overflow | Accelerator status packed into one word. |
 | `0x08` | `TILE_COUNT` | RW | `[31:0]` | Number of tiles/work items for the scheduler. |
-| `0x0C` | `WEIGHT_DATA` | WO | `[31:0]` | Packed weight payload. |
-| `0x10` | `ACT_DATA` | WO | `[31:0]` | Packed activation payload. |
-| `0x14` | `RESULT` | RO | `[31:0]` | Packed result payload. Reading may consume/acknowledge the current result. |
+| `0x0C` | `WEIGHT_DATA` | WO | `[31:0]` | One INT8x4 weight word per write, tile 0 first. |
+| `0x10` | `ACT_DATA` | WO | `[31:0]` | One INT8x4 activation word per write, tile 0 first. |
+| `0x14` | `RESULT` | RO | `[31:0]` | Signed 32-bit dot product of the next tile, in tile order. Each read advances to the next tile. |
 | `0x18` | `ERROR` | RO | `[31:0]` | Sticky/debug error flags. |
 | `0x1C` | `LED_MIRROR` | RW | `[3:0]` | Optional direct LED/debug mirror for PYNQ bring-up. |
 | `0x20` | `TILE_SELECT` | RW | `[7:0]` | Optional tile select/debug register. |
@@ -37,3 +37,25 @@ All registers are 32 bits wide and require aligned word accesses.
 - This register map intentionally mirrors the CPU MMIO map where possible so the same software mental model works in simulation and on PYNQ.
 - AXI-Lite will expose these offsets from whatever base address Vivado assigns.
 - DMA registers are reserved for the later higher-throughput path and do not need to be implemented for the first AXI-Lite bring-up.
+
+## CPU registers and memories (`pynq_soc_top`)
+
+The board design also contains the project CPU. These offsets are from the same
+base address. The window is 8 KB in total.
+
+| Offset | Name | Access | Description |
+|---|---|---|---|
+| `0x0100` | `SOC_CTRL` | RW | bit0 = `cpu_run`. 1 releases the CPU from reset and gives it the accelerator. 0 holds the CPU in reset and gives the accelerator back to the host. |
+| `0x0104` | `SOC_STATUS` | RO | bit0 = `cpu_run`, bit1 = the CPU made an invalid MMIO access (sticky until the next release) |
+| `0x0108` | `CPU_PC` | RO | CPU program counter |
+| `0x0400`-`0x07FC` | instruction memory | RW | 256 words. Write only while `cpu_run` = 0. |
+| `0x1000`-`0x1FFC` | data memory | RW | 1024 words, CPU byte addresses `0x000`-`0xFFC`. Host writes are accepted only while `cpu_run` = 0. |
+
+The CPU sees the accelerator registers at `0x8000_0000` + the offsets in the
+first table, plus a 4-bit LED register at `0x8000_001C`. While `cpu_run` = 1,
+the board LEDs show the CPU's LED register.
+
+`software/mini_accel/firmware.py` documents the data-memory layout used by the
+neural-network firmware. `software/mini_accel/cpu_host.py` shows the host side:
+load once, then per image write the image, release the CPU, wait for `DONE`,
+and read the answer.

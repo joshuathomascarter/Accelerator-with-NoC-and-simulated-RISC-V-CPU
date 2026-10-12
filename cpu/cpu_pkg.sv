@@ -13,6 +13,7 @@ localparam logic [31:0] CPU_MMIO_ACCEL_WEIGHT     = 32'h8000_000C;
 localparam logic [31:0] CPU_MMIO_ACCEL_ACT        = 32'h8000_0010;
 localparam logic [31:0] CPU_MMIO_ACCEL_RESULT     = 32'h8000_0014;
 localparam logic [31:0] CPU_MMIO_ACCEL_ERROR      = 32'h8000_0018;
+localparam logic [31:0] CPU_MMIO_LED              = 32'h8000_001C;  // handled by pynq_soc_top
 localparam logic [31:0] CPU_MMIO_ACCEL_MASK       = 32'hFFFF_FFE0;
 
 localparam int CPU_MMIO_CTRL_START_BIT       = 0;
